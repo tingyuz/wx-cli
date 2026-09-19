@@ -14,5 +14,5 @@ pub use db::{
 pub use dispatch::{dispatch_decrypt_db, dispatch_decrypt_wal};
 pub use error::DecryptError;
 pub use key_material::{EncKeyPair, KeyMaterial};
-pub use params::{CryptoParams, MACOS_4_1_7_31};
+pub use params::{CryptoParams, MACOS_4_1_7_31, WECHAT_4_X};
 pub use wal::{decrypt_wal, decrypt_wal_direct};

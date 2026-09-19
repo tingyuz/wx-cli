@@ -43,6 +43,9 @@ pub enum KeychainError {
     #[error("task_for_pid failed for PID {pid} (kern_return={kr}) — ensure SIP is disabled (csrutil disable in Recovery Mode) and run with sudo")]
     TaskForPidFailed { pid: u32, kr: i32 },
 
+    #[error("cannot attach to WeChat process memory — kernel.yama.ptrace_scope is not 0; run `sudo sysctl -w kernel.yama.ptrace_scope=0` or run as root (CAP_SYS_PTRACE)")]
+    PtraceBlocked,
+
     #[error("no valid enc_key found in WeChat process memory")]
     NoKeysFound,
 

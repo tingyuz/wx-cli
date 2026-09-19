@@ -4,6 +4,8 @@ pub mod scanner;
 
 #[cfg(target_os = "macos")]
 pub mod mach_reader;
+#[cfg(target_os = "linux")]
+pub mod proc_reader;
 
 pub use pattern::{scan_chunk, FoundKey};
 pub use reader::{MemRegion, MemoryReader};
@@ -11,14 +13,16 @@ pub use scanner::{MemoryScanner, ScanResult};
 
 #[cfg(target_os = "macos")]
 pub use mach_reader::MachVmReader;
+#[cfg(target_os = "linux")]
+pub use proc_reader::ProcFsReader;
 
 use crate::error::KeychainError;
 use crate::process::AccountDirInfo;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use wx_decrypt::{EncKeyPair, KeyMaterial};
+use wx_decrypt::{CryptoParams, EncKeyPair, KeyMaterial};
 
-/// Result of a successful Mach VM key capture for one account.
+/// Result of a successful memory key capture for one account.
 #[derive(Debug, Clone)]
 pub struct MachCaptureResult {
     pub key_material: KeyMaterial,
@@ -43,19 +47,17 @@ fn find_db_files(dir: &std::path::Path) -> Vec<PathBuf> {
     result
 }
 
-/// Scan WeChat process memory for pre-derived encryption keys.
+/// Shared memory-scan key capture flow, used on macOS (`task_for_pid`) and
+/// Linux (`/proc/<pid>/mem`).
 ///
-/// Attaches to the process via `task_for_pid`, enumerates RW regions, scans for
-/// `x'<enc_key><salt>'` patterns, matches each candidate's salt against the
-/// provided account DBs, and HMAC-validates before returning.
-#[cfg(target_os = "macos")]
-pub fn capture_key_mach(
-    pid: u32,
+/// Enumerates the process's writable regions, scans for `x'<enc_key><salt>'`
+/// patterns, matches each candidate's salt against the provided account DBs,
+/// and HMAC-validates before returning.
+fn scan_with_reader<R: MemoryReader>(
+    reader: R,
     accounts: &[AccountDirInfo],
-    params: &wx_decrypt::CryptoParams,
+    params: &CryptoParams,
 ) -> Result<Vec<MachCaptureResult>, KeychainError> {
-    let reader = MachVmReader::attach(pid)?;
-
     // Collect (salt, db_path) pairs for ALL candidate DBs across all accounts.
     let mut db_salts: Vec<([u8; 16], PathBuf)> = Vec::new();
     for account in accounts {
@@ -136,4 +138,29 @@ pub fn capture_key_mach(
     });
 
     Ok(results)
+}
+
+/// Scan WeChat process memory for pre-derived encryption keys (macOS).
+#[cfg(target_os = "macos")]
+pub fn capture_key_mach(
+    pid: u32,
+    accounts: &[AccountDirInfo],
+    params: &wx_decrypt::CryptoParams,
+) -> Result<Vec<MachCaptureResult>, KeychainError> {
+    let reader = MachVmReader::attach(pid)?;
+    scan_with_reader(reader, accounts, params)
+}
+
+/// Scan WeChat process memory for pre-derived encryption keys (Linux).
+///
+/// Reads `/proc/<pid>/mem` (requires same user with `ptrace_scope=0`, root,
+/// or `CAP_SYS_PTRACE`) — no restart/relogin needed.
+#[cfg(target_os = "linux")]
+pub fn capture_key_linux(
+    pid: u32,
+    accounts: &[AccountDirInfo],
+    params: &wx_decrypt::CryptoParams,
+) -> Result<Vec<MachCaptureResult>, KeychainError> {
+    let reader = ProcFsReader::attach(pid)?;
+    scan_with_reader(reader, accounts, params)
 }

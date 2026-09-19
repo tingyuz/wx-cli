@@ -264,7 +264,12 @@ mod tests {
 
     #[test]
     fn format_month_zero() {
-        assert_eq!(format_month(0), "1970-01");
+        let expected = chrono::DateTime::from_timestamp(0, 0)
+            .unwrap()
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m")
+            .to_string();
+        assert_eq!(format_month(0), expected);
     }
 
     #[test]

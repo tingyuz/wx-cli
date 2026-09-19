@@ -4,9 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Features
+
+- **Linux support** — `wx-cli` now builds and runs on Linux (x86_64): locate WeChat data under `~/Documents/xwechat_files/` (falling back to `~/xwechat_files/`), detect the WeChat version via `dpkg-query`/`rpm`, and capture keys with `key scan` by reading `/proc/<pid>/mem` (requires `ptrace_scope=0` or root/CAP_SYS_PTRACE; no WeChat restart needed). `key extract` (LLDB hook) remains macOS-only.
+- **Platform-aware health checks** — `doctor` verifies SIP/DevToolsSecurity/LLDB on macOS and `kernel.yama.ptrace_scope`/`pgrep` on Linux.
+
 ### Changed
 
 - Accept WeChat 4.1.7 and newer for key extraction instead of maintaining a fixed version-prefix allowlist.
+- Build SQLCipher with vendored OpenSSL on Linux (CommonCrypto remains the macOS crypto provider).
+- Add a Linux CI job (fmt/clippy/test on ubuntu-latest) and a Linux release binary (`wx-cli-…-linux-x86_64.tar.gz`).
 
 ## [0.7.4] - 2026-07-22
 

@@ -11,10 +11,17 @@ wx-paths = { path = "../wx-paths" }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 hex = "0.4"
-rusqlite = { version = "0.40", features = ["bundled-sqlcipher"] }
 dashmap = "6"
 rayon = "1"
 rust-stemmers = "1"
+
+# SQLCipher needs a crypto provider: CommonCrypto on macOS, vendored OpenSSL
+# on Linux (system libssl-dev headers are not always present).
+[target.'cfg(target_os = "linux")'.dependencies]
+rusqlite = { version = "0.40", features = ["bundled-sqlcipher-vendored-openssl"] }
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+rusqlite = { version = "0.40", features = ["bundled-sqlcipher"] }
 
 [dev-dependencies]
 tempfile = "3"

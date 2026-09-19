@@ -5,11 +5,22 @@ use crate::error::KeychainError;
 
 pub const SUPPORTED_VERSION: &str = "4.1.7+";
 
+/// Executable/process name of WeChat on the current platform.
+#[cfg(target_os = "macos")]
+pub const WECHAT_PROCESS_NAME: &str = "WeChat";
+#[cfg(target_os = "linux")]
+pub const WECHAT_PROCESS_NAME: &str = "wechat";
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub const WECHAT_PROCESS_NAME: &str = "WeChat";
+
 /// Minimum version accepted for key extraction.
 /// Encryption params (PBKDF2-HMAC-SHA512, 256K iterations) are identical from this version onward.
+#[cfg(target_os = "macos")]
 const MIN_EXTRACTION_VERSION: (u64, u64, u64) = (4, 1, 7);
 
-/// Check whether a version string is compatible with our LLDB key extraction.
+/// Check whether a version string is compatible with our LLDB key extraction
+/// (macOS only — Linux key extraction is self-validating via HMAC).
+#[cfg(target_os = "macos")]
 fn is_extraction_compatible(version: &str) -> bool {
     let mut components = version.split('.');
     let Some(major) = components.next().and_then(|value| value.parse().ok()) else {
@@ -99,7 +110,9 @@ pub fn extract_base_wxid_for_account_dir_under_root(
 /// Uses `pgrep` to find the PID and checks the installed WeChat version.
 /// Does NOT use `lsof` — suitable for commands that only need PID + version.
 pub fn find_wechat_pid() -> Result<(u32, String), KeychainError> {
-    let pgrep_output = Command::new("pgrep").args(["-x", "WeChat"]).output()?;
+    let pgrep_output = Command::new("pgrep")
+        .args(["-x", WECHAT_PROCESS_NAME])
+        .output()?;
 
     if !pgrep_output.status.success() {
         return Err(KeychainError::WeChatNotRunning);
@@ -122,15 +135,29 @@ pub fn find_wechat_pid() -> Result<(u32, String), KeychainError> {
 }
 
 /// Ensure the installed WeChat version matches the supported target.
+///
+/// On macOS this enforces the minimum version required by the LLDB hook.
+/// On Linux the memory scan is self-validating (each candidate is HMAC-checked
+/// against the actual database salt), so the version is informational only.
 pub fn ensure_supported_wechat_version() -> Result<String, KeychainError> {
     let version = get_wechat_version()?;
-    if !is_extraction_compatible(&version) {
-        return Err(KeychainError::UnsupportedVersion { version });
+
+    #[cfg(target_os = "macos")]
+    {
+        if !is_extraction_compatible(&version) {
+            return Err(KeychainError::UnsupportedVersion { version });
+        }
+        Ok(version)
     }
-    Ok(version)
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(version)
+    }
 }
 
-/// Get WeChat version from the application bundle.
+/// Get WeChat version from the application bundle (macOS).
+#[cfg(target_os = "macos")]
 fn get_wechat_version() -> Result<String, KeychainError> {
     let output = Command::new("defaults")
         .args([
@@ -149,13 +176,105 @@ fn get_wechat_version() -> Result<String, KeychainError> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// Get WeChat version from the package manager (Linux).
+///
+/// Attempts `dpkg-query` (Debian/Ubuntu) then `rpm` (Fedora/RHEL). Returns
+/// `"unknown"` when WeChat is installed via AppImage or another method — key
+/// extraction does not depend on it.
+#[cfg(target_os = "linux")]
+fn get_wechat_version() -> Result<String, KeychainError> {
+    let dpkg = Command::new("dpkg-query")
+        .args(["-W", "-f=${Version}", "wechat"])
+        .output();
+    if let Ok(output) = dpkg {
+        if output.status.success() {
+            if let Some(v) = parse_distro_version(&output.stdout) {
+                return Ok(v);
+            }
+        }
+    }
+
+    let rpm = Command::new("rpm")
+        .args(["-q", "--queryformat", "%{VERSION}", "wechat"])
+        .output();
+    if let Ok(output) = rpm {
+        if output.status.success() {
+            if let Some(v) = parse_distro_version(&output.stdout) {
+                return Ok(v);
+            }
+        }
+    }
+
+    Ok("unknown".to_string())
+}
+
+/// Fallback version lookup for unsupported platforms.
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn get_wechat_version() -> Result<String, KeychainError> {
+    Ok("unknown".to_string())
+}
+
+/// Normalize a distro version string (e.g. `2:4.1.13-1` or `4.1.13.0`) into a
+/// plain `4.1.13`-style version.
+#[cfg(target_os = "linux")]
+fn parse_distro_version(raw: &[u8]) -> Option<String> {
+    let s = String::from_utf8_lossy(raw).trim().to_string();
+    if s.is_empty() {
+        return None;
+    }
+    // Strip Debian epoch (`2:`) and revision (`-1`).
+    let s = s.split(':').next_back().unwrap_or(&s);
+    let s = s.split('-').next().unwrap_or(s);
+    let fields: Vec<&str> = s.split('.').collect();
+    let mut out = Vec::new();
+    for f in fields {
+        if f.is_empty() || !f.chars().all(|c| c.is_ascii_digit()) {
+            break;
+        }
+        out.push(f);
+    }
+    match out.len() {
+        0 => None,
+        _ => Some(out.join(".")),
+    }
+}
+
 /// Shared config directory resolved by `AppPaths`.
 pub fn config_dir() -> Result<PathBuf, KeychainError> {
     let ap = wx_paths::AppPaths::new().map_err(|e| KeychainError::Other(e.to_string()))?;
     Ok(ap.config_dir())
 }
 
-/// Default xwechat_files base path.
+/// Default xwechat_files base path (macOS container container path).
+#[cfg(target_os = "macos")]
+fn default_xwechat_files_base() -> Result<PathBuf, KeychainError> {
+    let ap = wx_paths::AppPaths::new().map_err(|e| KeychainError::Other(e.to_string()))?;
+    Ok(ap
+        .home()
+        .join("Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files"))
+}
+
+/// Default xwechat_files base path (Linux).
+///
+/// WeChat for Linux 4.x stores its data under `~/Documents/xwechat_files/`;
+/// some distro packagings use a top-level `~/xwechat_files/` instead.
+#[cfg(target_os = "linux")]
+fn default_xwechat_files_base() -> Result<PathBuf, KeychainError> {
+    let ap = wx_paths::AppPaths::new().map_err(|e| KeychainError::Other(e.to_string()))?;
+    let home = ap.home();
+    for base in [
+        home.join("Documents/xwechat_files"),
+        home.join("xwechat_files"),
+    ] {
+        if base.exists() {
+            return Ok(base);
+        }
+    }
+    Ok(home.join("Documents/xwechat_files"))
+}
+
+/// Fallback data dir lookup for unsupported platforms.
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn default_xwechat_files_base() -> Result<PathBuf, KeychainError> {
     let ap = wx_paths::AppPaths::new().map_err(|e| KeychainError::Other(e.to_string()))?;
     Ok(ap
@@ -165,8 +284,8 @@ fn default_xwechat_files_base() -> Result<PathBuf, KeychainError> {
 
 /// Detect account directories from the filesystem (without WeChat running).
 ///
-/// Scans `~/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/`
-/// for subdirectories containing `db_storage/message/message_0.db`.
+/// Scans the platform's `xwechat_files/` directory for subdirectories
+/// containing `db_storage/message/message_0.db`.
 pub fn find_account_dirs() -> Result<Vec<AccountDirInfo>, KeychainError> {
     let base = default_xwechat_files_base()?;
     if !base.exists() {
@@ -209,7 +328,7 @@ pub fn is_xwechat_files_root(path: &Path) -> bool {
 /// so it won't block commands (sessions, query, etc.) that don't depend on version.
 fn is_wechat_running() -> bool {
     Command::new("pgrep")
-        .args(["-x", "WeChat"])
+        .args(["-x", WECHAT_PROCESS_NAME])
         .output()
         .is_ok_and(|o| o.status.success())
 }
@@ -367,6 +486,7 @@ fn tiebreak_by_wal_mtime<'a>(accounts: &[&'a AccountDirInfo]) -> Option<&'a Acco
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn test_extraction_version_accepts_4_1_7_and_newer() {
         for version in [
@@ -379,6 +499,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn test_extraction_version_rejects_older_and_invalid_versions() {
         for version in ["4.1.6.99", "4.0.99", "3.9.9", "4.1", "4.1.beta", ""] {
@@ -387,6 +508,29 @@ mod tests {
                 "expected {version:?} to be rejected"
             );
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_parse_distro_version_debian() {
+        // Debian: epoch 2, revision -1
+        assert_eq!(parse_distro_version(b"2:4.1.13-1\n"), Some("4.1.13".into()));
+        assert_eq!(parse_distro_version(b"4.1.13\n"), Some("4.1.13".into()));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_parse_distro_version_rpm() {
+        // rpm --queryformat %{VERSION}
+        assert_eq!(parse_distro_version(b"4.1.13\n"), Some("4.1.13".into()));
+        assert_eq!(parse_distro_version(b"4.1.13.0\n"), Some("4.1.13.0".into()));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_parse_distro_version_garbage() {
+        assert_eq!(parse_distro_version(b""), None);
+        assert_eq!(parse_distro_version(b"unknown\n"), None);
     }
 
     #[test]

@@ -4,7 +4,6 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-rusqlite = { version = "0.40", features = ["bundled-sqlcipher"] }
 prost = "0.13"
 zstd = "0.13"
 md5 = "0.7"
@@ -13,6 +12,14 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 hex = "0.4"
 wx-decrypt = { path = "../wx-decrypt" }
+
+# SQLCipher needs a crypto provider: CommonCrypto on macOS, vendored OpenSSL
+# on Linux (system libssl-dev headers are not always present).
+[target.'cfg(target_os = "linux")'.dependencies]
+rusqlite = { version = "0.40", features = ["bundled-sqlcipher-vendored-openssl"] }
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+rusqlite = { version = "0.40", features = ["bundled-sqlcipher"] }
 
 [dev-dependencies]
 insta = { version = "1", features = ["yaml"] }

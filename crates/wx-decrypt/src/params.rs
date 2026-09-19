@@ -9,8 +9,9 @@ pub struct CryptoParams {
     pub iv_size: usize,
 }
 
-/// macOS WeChat 4.1.7.31: Apple SEE with PBKDF2-HMAC-SHA512.
-pub const MACOS_4_1_7_31: CryptoParams = CryptoParams {
+/// WeChat 4.x desktop (Windows/macOS/Linux): the shared SQLCipher 4 parameters
+/// (PBKDF2-HMAC-SHA512 with 256k iterations) used on every platform.
+pub const WECHAT_4_X: CryptoParams = CryptoParams {
     page_size: 4096,
     kdf_iter: 256_000,
     hmac_size: 64, // SHA-512 output
@@ -19,3 +20,7 @@ pub const MACOS_4_1_7_31: CryptoParams = CryptoParams {
     salt_size: 16,
     iv_size: 16,
 };
+
+/// macOS WeChat 4.1.7.31. Identical to [`WECHAT_4_X`]; kept as an alias for
+/// backwards compatibility (the parameters apply to Windows/Linux too).
+pub const MACOS_4_1_7_31: CryptoParams = WECHAT_4_X;

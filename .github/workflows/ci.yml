@@ -34,3 +34,16 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test
+
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Install system dependencies (clang for silk-rs/bindgen)
+        run: sudo apt-get update && sudo apt-get install -y clang libclang-dev
+      - run: cargo fmt --check
+      - run: cargo clippy -- -D warnings
+      - run: cargo test
