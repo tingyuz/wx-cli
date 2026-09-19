@@ -4,9 +4,16 @@
 
 ## [未发布]
 
+### 功能
+
+- **Linux 支持** — `wx-cli` 现在可以在 Linux（x86_64）上构建和运行：自动定位 `~/Documents/xwechat_files/`（回退 `~/xwechat_files/`）下的微信数据，通过 `dpkg-query`/`rpm` 检测微信版本，并通过读取 `/proc/<pid>/mem` 用 `key scan` 捕获密钥（需要 `ptrace_scope=0` 或以 root / `CAP_SYS_PTRACE` 运行，无需重启微信）。`key extract`（LLDB 方式）仍仅支持 macOS。
+- **平台自适应环境检查** — `doctor` 在 macOS 检查 SIP/DevToolsSecurity/LLDB，在 Linux 检查 `kernel.yama.ptrace_scope`/`pgrep`。
+
 ### 变更
 
 - 密钥提取改为支持 WeChat 4.1.7 及以上版本，不再维护固定版本前缀白名单。
+- Linux 下 SQLCipher 改用 vendored OpenSSL 编译（macOS 仍使用 CommonCrypto）。
+- 新增 Linux CI 任务（ubuntu-latest 上运行 fmt/clippy/test）以及 Linux 发布二进制（`wx-cli-…-linux-x86_64.tar.gz`）。
 
 ## [0.7.4] - 2026-07-22
 

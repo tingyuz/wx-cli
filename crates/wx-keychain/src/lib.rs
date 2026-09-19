@@ -10,6 +10,8 @@ pub mod store;
 pub use account_id::AccountId;
 pub use error::KeychainError;
 pub use lldb::{capture_key, CaptureResult};
+#[cfg(target_os = "linux")]
+pub use mach_vm::{capture_key_linux, MachCaptureResult};
 #[cfg(target_os = "macos")]
 pub use mach_vm::{capture_key_mach, MachCaptureResult};
 pub use nickname::resolve_nickname;
@@ -160,21 +162,71 @@ pub fn check_binary(name: &'static str, version_flag: &str) -> PreflightCheck {
     }
 }
 
+/// Check `kernel.yama.ptrace_scope` (Linux).
+///
+/// Attaching to WeChat's memory via `/proc/<pid>/mem` requires either
+/// `ptrace_scope = 0`, root, or `CAP_SYS_PTRACE`.
+#[cfg(target_os = "linux")]
+pub fn check_ptrace_scope() -> PreflightCheck {
+    let (passed, detail) = match std::fs::read_to_string("/proc/sys/kernel/yama/ptrace_scope") {
+        Ok(contents) => {
+            let scope = contents.trim();
+            if scope == "0" {
+                (true, "kernel.yama.ptrace_scope is 0 (unrestricted)".into())
+            } else {
+                (
+                    false,
+                    format!(
+                        "kernel.yama.ptrace_scope is {scope} — key scan can only attach as root / CAP_SYS_PTRACE"
+                    ),
+                )
+            }
+        }
+        Err(_) => (
+            true,
+            "kernel.yama.ptrace_scope is not exposed (unrestricted)".into(),
+        ),
+    };
+    PreflightCheck {
+        name: "ptrace scope",
+        passed,
+        detail,
+        fix_cmd: if passed {
+            None
+        } else {
+            Some("sudo sysctl -w kernel.yama.ptrace_scope=0  # or run wx-cli as root (CAP_SYS_PTRACE)".into())
+        },
+    }
+}
+
 /// 运行所有前置条件检查，返回结果列表。
 pub fn all_preflight_checks() -> Vec<PreflightCheck> {
-    vec![
-        check_sip(),
-        check_dev_tools_security(),
-        check_developer_group(),
-        check_binary("lldb", "--version"),
-        check_binary("python3", "-V"),
-    ]
+    #[cfg(target_os = "macos")]
+    {
+        vec![
+            check_sip(),
+            check_dev_tools_security(),
+            check_developer_group(),
+            check_binary("lldb", "--version"),
+            check_binary("python3", "-V"),
+        ]
+    }
+    #[cfg(target_os = "linux")]
+    {
+        vec![check_ptrace_scope(), check_binary("pgrep", "--version")]
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        vec![check_binary("pgrep", "--version")]
+    }
 }
 
 /// Pre-flight checks before key extraction.
 ///
-/// Verifies: SIP disabled, DevToolsSecurity enabled, _developer group membership,
-/// LLDB and python3 available.
+/// macOS: verifies SIP disabled, DevToolsSecurity enabled, `_developer` group
+/// membership, LLDB and python3 availability.
+/// Linux: verifies that attaching to WeChat process memory is permitted
+/// (yama ptrace_scope) and that `pgrep` is available.
 pub fn preflight_checks() -> Result<(), KeychainError> {
     for check in all_preflight_checks() {
         if !check.passed {
@@ -187,6 +239,7 @@ pub fn preflight_checks() -> Result<(), KeychainError> {
                         .unwrap_or_else(|_| "$USER".into());
                     KeychainError::NotInDeveloperGroup(user)
                 }
+                "ptrace scope" => KeychainError::PtraceBlocked,
                 "lldb" => KeychainError::LldbNotFound,
                 "python3" => KeychainError::Python3NotFound,
                 _ => KeychainError::Other(check.detail),

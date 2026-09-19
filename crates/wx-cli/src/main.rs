@@ -17,7 +17,7 @@ pub(crate) mod visibility_projection;
 #[derive(Parser)]
 #[command(
     name = "wx-cli",
-    about = "WeChat database decryption tool (macOS 4.1.x)"
+    about = "WeChat database decryption tool (macOS / Linux)"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -540,6 +540,17 @@ enum KeyAction {
         /// 32-byte hex key
         hex_key: String,
     },
+    /// Import per-DB enc_key + salt pairs from a wcdb-key-tool all_keys.json
+    #[command(name = "set-enc")]
+    SetEnc {
+        /// Account directory name as stored in KeyStore (e.g. wxid_xxx_ab12, testuser001_1662)
+        account: String,
+        /// Path to all_keys.json produced by wcdb-key-tool
+        keys_json: PathBuf,
+        /// WeChat version to record (for display only)
+        #[arg(long, default_value = "4.1+")]
+        version: String,
+    },
     /// Manually set V2 image AES key for an account
     #[command(name = "set-image")]
     SetImage {
@@ -548,7 +559,7 @@ enum KeyAction {
         /// 16-byte image AES key (ASCII string or hex)
         image_key: String,
     },
-    /// Scan WeChat process memory for pre-derived encryption keys (requires SIP disabled + sudo, no restart needed)
+    /// Scan WeChat process memory for pre-derived encryption keys (no WeChat restart needed)
     Scan,
 }
 
@@ -573,6 +584,11 @@ async fn main() {
             KeyAction::Extract { timeout: t } => cmd::key::cmd_key_extract(t).await,
             KeyAction::List => cmd::key::cmd_key_list(),
             KeyAction::Set { account, hex_key } => cmd::key::cmd_key_set(&account, &hex_key),
+            KeyAction::SetEnc {
+                account,
+                keys_json,
+                version,
+            } => cmd::key::cmd_key_set_enc(&account, &keys_json, &version),
             KeyAction::SetImage { account, image_key } => {
                 cmd::key::cmd_key_set_image(&account, &image_key)
             }

@@ -2,7 +2,7 @@
 
 > 把微信变成 Agent 能读取、能搜索、能实时订阅的数据源。
 
-wx-cli 直接读取 Mac 上的微信本地数据，让你和 Agent 都能访问自己的聊天记录、联系人、群聊和媒体消息。数据默认留在本机，不需要上传聊天数据库，也不依赖云端导出。
+wx-cli 直接读取 Mac / Linux 上的微信本地数据，让你和 Agent 都能访问自己的聊天记录、联系人、群聊和媒体消息。数据默认留在本机，不需要上传聊天数据库，也不依赖云端导出。
 
 ## 它能做什么
 
@@ -37,10 +37,12 @@ wx-cli 提供了最关键的两样东西：完整的历史上下文，以及持�
 
 ## 支持范围
 
-- **平台**：macOS（arm64 / Apple Silicon）
-- **WeChat 版本**：4.1.7 及以上
+- **平台**：macOS（arm64 / Apple Silicon）、Linux（x86_64）
+- **WeChat 版本**：4.1.7 及以上（密钥捕获方式随平台/版本而异，Linux 4.1+ 需走 GDB passphrase 方式，见下文）
 
 ## 前置条件
+
+### macOS
 
 密钥提取**需要 SIP 关闭**（SIP enabled 时 `task_for_pid` 被内核拒绝，即使 root 也不行），通常不需要 sudo。如果你已有密钥，可以跳过 SIP 要求，直接用 `key set` 手动录入。
 
@@ -50,16 +52,38 @@ wx-cli 提供了最关键的两样东西：完整的历史上下文，以及持�
 2. `sudo dscl . append /Groups/_developer GroupMembership $USER`
 3. `xcode-select --install`（提供 `lldb` 和 `python3`）
 
+### Linux
+
+数据目录为 `~/Documents/xwechat_files/<wxid>/`（部分发行版为 `~/xwechat_files/`）。
+
+`key scan` 通过 `/proc/<pid>/mem` 读取 WeChat 进程内存（无需重启/重新登录），需要：
+
+1. 由当前用户或其他同属用户运行的 WeChat（Linux 版 WeChat）
+2. `kernel.yama.ptrace_scope` 为 `0`，或以 root / `CAP_SYS_PTRACE` 运行
+
+```bash
+sudo sysctl -w kernel.yama.ptrace_scope=0   # 临时（重启后失效）
+# 或写入 /etc/sysctl.d/99-ptrace.conf 永久生效
+```
+
+> **WeChat 4.1+（Linux）注意**：自 4.1 起，微信不再在内存中缓存原始数据库密钥，而是缓存一个 32 字节的 **passphrase**（每个数据库用同一 passphrase 加自己的 salt 经 PBKDF2 派生出独立密钥）。因此 `key scan` 在 4.1+（如 4.1.13）上会扫描不到任何 `x'<hex>'` 字面量，直接报 "no valid enc_key found"。4.1+ 请改用 [GDB 断点捕获 passphrase](#2-提取密钥) + `key set-enc` 导入密钥的方式。
+
+`key extract`（LLDB 方式）仅支持 macOS。如果你已有密钥，可以跳过上述要求，直接用 `key set` 手动录入。
+
 ## 安装
 
 ### 从 Release 下载（推荐）
 
-前往 [Releases](https://github.com/pandorafuture/wx-cli/releases/latest) 下载预编译二进制（macOS arm64），或使用命令行：
+前往 [Releases](https://github.com/pandorafuture/wx-cli/releases/latest) 下载预编译二进制（macOS arm64 / Linux x86_64），或使用命令行：
 
 ```bash
-# 下载最新 release
+# 下载最新 release（自动匹配当前平台：macos-arm64 / linux-x86_64）
+case "$(uname -s)" in
+  Darwin) asset="macos-arm64" ;;
+  Linux)  asset="linux-x86_64" ;;
+esac
 curl -fSL "$(curl -fsSL https://api.github.com/repos/pandorafuture/wx-cli/releases/latest \
-  | grep -o '"browser_download_url": "[^"]*macos-arm64[^"]*"' \
+  | grep -o "\"browser_download_url\": \"[^\"]*${asset}[^\"]*\"" \
   | cut -d'"' -f4)" -o wx-cli.tar.gz
 tar xzf wx-cli.tar.gz
 
@@ -76,6 +100,8 @@ wx-cli --version
 # 需要 Rust 工具链（rustup 安装即可）
 cargo build --release
 ```
+
+Linux 构建需要 `clang`（含内置头文件，供 silk-rs 的 bindgen 使用）；安装方式：`sudo apt install clang libclang-dev`（Debian/Ubuntu）或 `sudo dnf install clang libclang`（Fedora/RHEL）。
 
 编译产物位于 `target/release/wx-cli`。
 
@@ -106,26 +132,42 @@ npx skills add pandorafuture/wx-cli
 ### 1. 检查环境
 
 ```bash
-wx-cli doctor       # 检查 SIP、DevToolsSecurity、_developer 组、LLDB/python3
+wx-cli doctor       # macOS: 检查 SIP、DevToolsSecurity、_developer 组、LLDB；Linux: 检查 ptrace_scope、微信进程
 wx-cli status       # 查看 WeChat 运行状态和所有账号密钥/缓存状态
 ```
 
 ### 2. 提取密钥
 
-```bash
-# LLDB hook 提取密钥 — 会重启 WeChat，通常不需要 sudo
-wx-cli key extract --timeout 120
+**macOS（推荐）**：LLDB hook 捕获 PBKDF2 调用，覆盖所有数据库（会重启 WeChat，通常不需要 sudo）：
 
-# 查看已保存的密钥
-wx-cli key list
+```bash
+wx-cli key extract --timeout 120
 ```
 
-`key extract` 通过 LLDB hook 捕获 PBKDF2 调用获取原始密钥，覆盖所有数据库。
-
-手动设置密钥：
+**Linux（WeChat ≤ 4.0.x）**：扫描进程内存中缓存的 `x'<hex>'` 密钥字面量，无需重启、无需重新登录：
 
 ```bash
-wx-cli key set <account> <64-hex-key>          # 数据库密钥
+wx-cli key scan
+```
+
+**Linux（WeChat 4.1+）**：内存中不再缓存原始密钥，需要 GDB 断点捕获登录时的 passphrase（首次需重新登录一次微信）：
+
+```bash
+# 1) 安装 gdb（Debian/Ubuntu: sudo apt install gdb；Fedora/RHEL: sudo dnf install gdb）
+# 2) 用 wcdb-key-tool 捕获 passphrase（会提示你在微信里退出登录再重新登录）
+sudo python3 wcdb_key_tool.py extract --timeout 600
+#    这里会生成 all_keys.json（内含每个数据库的 salt + enc_key）
+# 3) 导入到 wx-cli 密钥库
+wx-cli key set-enc <account> all_keys.json
+```
+
+`wcdb-key-tool` 项目地址：<https://github.com/TANGandXue/wcdb-key-tool>。`extract` 需要 Python 3.10+、`gdb`，以及 root / `CAP_SYS_PTRACE`（或 `ptrace_scope=0`）；它会自动校验并派生每个数据库的密钥后再写出 `all_keys.json`。
+
+查看已保存密钥 / 手动设置：
+
+```bash
+wx-cli key list
+wx-cli key set <account> <64-hex-key>          # 数据库密钥（单个原始密钥）
 wx-cli key set-image <account> <image-key>     # 图片密钥
 ```
 
@@ -189,9 +231,11 @@ REST 端点：`/api/v1/health`、`/api/v1/sessions`、`/api/v1/contacts`、`/api
 |------|------|
 | `wx-cli status` | 查看 WeChat 运行状态 |
 | `wx-cli doctor` | 检查环境（SIP 等） |
-| `wx-cli key extract` | LLDB hook 提取密钥 |
+| `wx-cli key extract` | LLDB hook 提取密钥（macOS） |
+| `wx-cli key scan` | 扫描进程内存提取密钥（Linux / macOS） |
 | `wx-cli key list` | 查看已保存密钥 |
 | `wx-cli key set <account> <key>` | 手动设置密钥 |
+| `wx-cli key set-enc <account> <all_keys.json>` | 从 wcdb-key-tool 结果导入 per-DB 密钥（Linux 4.1+） |
 | `wx-cli key set-image <account> <image-key>` | 手动设置图片密钥 |
 | `wx-cli decrypt` | 解密数据库 |
 | `wx-cli sessions` | 最近会话列表 |
@@ -212,7 +256,7 @@ REST 端点：`/api/v1/health`、`/api/v1/sessions`、`/api/v1/contacts`、`/api
 
 按账号隐藏指定联系人、群聊或带特定标签的联系人。启用后，查询、导出、监控等命令默认应用隐藏规则（全文搜索除外）。
 
-配置文件：`~/Library/Application Support/wx-cli/config/settings.toml`
+配置文件：macOS `~/Library/Application Support/wx-cli/config/settings.toml`，Linux `~/.config/wx-cli/settings.toml`
 
 ```toml
 [accounts."<account_id>"]
@@ -224,29 +268,63 @@ ignore_tags = ["同事", "客户"]
 
 ## 文件路径
 
-| 类别 | 路径（macOS） | 用途 | 可删除？ |
-|------|---------------|------|----------|
-| Config | `~/Library/Application Support/wx-cli/config/` | 密钥、设置 | 否（先备份） |
-| Cache | `~/Library/Caches/wx-cli/` | 解密后数据库 | 可（重新 decrypt） |
-| State | `~/Library/Application Support/wx-cli/state/` | 服务运行时元数据 | 可 |
-| Logs | `~/Library/Logs/wx-cli/` | 服务日志 | 可 |
-| Temp | `$TMPDIR/wx-cli/` | 密钥提取临时文件 | 可 |
+| 类别 | macOS | Linux | 用途 | 可删除？ |
+|------|-------|-------|------|----------|
+| Config | `~/Library/Application Support/wx-cli/config/` | `~/.config/wx-cli/` | 密钥（keys.toml）、设置 | 否（先备份） |
+| Cache | `~/Library/Caches/wx-cli/` | `~/.cache/wx-cli/` | 解密后数据库 | 可（重新 decrypt） |
+| State | `~/Library/Application Support/wx-cli/state/` | `~/.local/state/wx-cli/` | 服务运行时元数据 | 可 |
+| Logs | `~/Library/Logs/wx-cli/` | `<state>/logs`（Linux） | 服务日志 | 可 |
+| Temp | `$TMPDIR/wx-cli/` | `/tmp/wx-cli/` | 密钥提取临时文件 | 可 |
 
-使用 `wx-cli paths` 查看所有路径。清理缓存：`rm -rf ~/Library/Caches/wx-cli/`。
+Linux 的 State 目录遵循 XDG：优先 `~/.local/state/wx-cli/`，不可用时回退到 `~/.local/share/wx-cli/`。
+
+使用 `wx-cli paths` 查看所有路径。清理缓存：macOS `rm -rf ~/Library/Caches/wx-cli/`，Linux `rm -rf ~/.cache/wx-cli/`。
 
 ## 项目结构
+
+Rust workspace，8 个 crate 分层解耦：底层负责密钥与解密，中层提供数据库查询，上层是 CLI、服务和实时订阅。
 
 ```
 wx-cli/
 ├── crates/
-│   ├── wx-decrypt/     # 核心解密库（KDF、逐页解密、整库解密）
-│   ├── wx-keychain/    # 密钥提取（LLDB hook）与本地存储
-│   ├── wx-cli/         # CLI 入口
-│   ├── wx-db/          # 数据库查询（联系人、消息、会话、群聊）
-│   ├── wx-media/       # 媒体解密（图片、语音、视频）
-│   ├── wx-monitor/     # 实时消息监听与增量监控
-│   ├── wx-context/     # 账号解析、解密缓存、联系人解析
-│   └── wx-paths/       # 平台路径管理
+│   ├── wx-cli/             # CLI 入口与命令分发（key / decrypt / query / export / search / watch / server …）
+│   ├── wx-decrypt/         # 核心解密库：PBKDF2 派生、SQLCipher 逐页解密、整库/单库解密
+│   │                       #   · params.rs     参数表（WECHAT_4_X、MACOS_4_1_7_31）
+│   │                       #   · key_material  密钥匹配（KeyMaterial / EncKeyPair）
+│   ├── wx-keychain/        # 密钥获取与存储
+│   │                       #   · mach_vm/      进程内存扫描（Linux：proc_reader.rs 读 /proc/<pid>/mem；
+│   │                       #                   macOS：capture_key_mach）
+│   │                       #   · lldb/         macOS LLDB hook 捕获
+│   │                       #   · process.rs    平台/版本检测、数据目录定位
+│   │                       #   · store.rs      KeyStore（keys.toml，支持 per-DB enc_key）
+│   ├── wx-db/              # 数据库查询：联系人、消息、会话、群聊、全文搜索（只读 SQL）
+│   ├── wx-media/           # 媒体解密：图片（.dat）、语音、视频号视频
+│   ├── wx-monitor/         # 实时消息监听：轮询 / WAL 增量 / SSE 事件推送
+│   ├── wx-context/         # 高层上下文：账号解析、解密缓存、联系人昵称解析
+│   └── wx-paths/           # 平台路径（macOS / Linux 的配置、缓存、状态、日志目录）
+├── .github/workflows/
+│   ├── ci.yml              # fmt + clippy + test（macOS / Linux 矩阵）
+│   └── release.yml         # 发布二进制：macOS arm64 / Linux x86_64
+├── SKILL.md                # Agent Skill（供 Claude Code、Codex、Cursor 直接安装）
+└── Cargo.toml              # workspace 配置（decrypt 等所有 crate 共享）
+```
+
+关键数据流：
+
+```
+密钥获取（key scan / key extract / key set / key set-enc）
+        │
+        ▼
+KeyStore（keys.toml，按账号保存 per-DB enc_key + salt）
+        │
+        ▼
+wx-decrypt（读取 DB 头部 salt → 匹配 enc_key → PBKDF2/SQLCipher 逐页解密）
+        │
+        ▼
+解密缓存（Cache 目录）
+        │
+        ▼
+wx-db（查询）→ wx-cli（query / export / search）；wx-monitor → SSE（watch / server）
 ```
 
 ## 常见问题
@@ -260,6 +338,17 @@ wx-cli/
 ### SIP / DevToolsSecurity 报错
 
 密钥提取需要 SIP 关闭。重启进入恢复模式执行 `csrutil disable`，然后运行 `wx-cli doctor` 逐项检查。
+
+### Linux 上 `key scan` 提示 "no valid enc_key found"（WeChat 4.1+）
+
+正常现象：4.1 起微信不再在内存中缓存原始密钥，而是缓存 32 字节 passphrase，`x'<hex>'` 字面量扫描失效。改用 GDB 断点捕获 passphrase 再导入：
+
+```bash
+sudo python3 wcdb_key_tool.py extract --timeout 600
+wx-cli key set-enc <account> all_keys.json
+```
+
+用 `wx-cli key list` 确认 enc 数量 > 0，`wx-cli decrypt` / `query` 验证解密。若 wcdb-key-tool 的 GDB 断点报 "Cannot insert breakpoint"，多半是它解析的运行时基址不对（PIE 二进制的 base 应为文件偏移 0 的映射段），可核对 `/proc/<pid>/maps`。
 
 ### 解密后数据库无法打开
 

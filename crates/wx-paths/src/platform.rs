@@ -10,6 +10,7 @@ pub(crate) struct PlatformBaseDirs {
 }
 
 impl PlatformBaseDirs {
+    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
     pub(crate) fn resolve(home: &Path) -> Result<Self, PathsError> {
         #[cfg(target_os = "macos")]
         {

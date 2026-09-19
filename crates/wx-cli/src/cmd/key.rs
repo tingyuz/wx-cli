@@ -1,76 +1,87 @@
+#[cfg(target_os = "macos")]
 use std::time::Duration;
 
 use crate::util::{lookup_or_resolve_nickname, parse_hex_key_32};
 
 pub async fn cmd_key_extract(timeout_secs: u64) -> Result<(), Box<dyn std::error::Error>> {
-    eprintln!("Running pre-flight checks...");
-    wx_keychain::preflight_checks()?;
-    eprintln!("  All checks passed.");
+    #[cfg(target_os = "macos")]
+    {
+        eprintln!("Running pre-flight checks...");
+        wx_keychain::preflight_checks()?;
+        eprintln!("  All checks passed.");
 
-    let version = wx_keychain::ensure_supported_wechat_version()?;
-    eprintln!("  WeChat version: {version}");
+        let version = wx_keychain::ensure_supported_wechat_version()?;
+        eprintln!("  WeChat version: {version}");
 
-    let accounts = wx_keychain::find_account_dirs()?;
-    if accounts.is_empty() {
-        return Err("no WeChat account directories found".into());
-    }
-
-    let mut store = wx_keychain::KeyStore::load_default()?;
-    let mut store_dirty = false;
-
-    eprintln!("Detected accounts:");
-    for a in &accounts {
-        let nick = lookup_or_resolve_nickname(&mut store, a);
-        if nick.is_some() {
-            store_dirty = true;
+        let accounts = wx_keychain::find_account_dirs()?;
+        if accounts.is_empty() {
+            return Err("no WeChat account directories found".into());
         }
-        eprintln!(
-            "  {} ({})",
-            a.account_id,
-            nick.unwrap_or_else(|| "昵称未知".to_string())
+
+        let mut store = wx_keychain::KeyStore::load_default()?;
+        let mut store_dirty = false;
+
+        eprintln!("Detected accounts:");
+        for a in &accounts {
+            let nick = lookup_or_resolve_nickname(&mut store, a);
+            if nick.is_some() {
+                store_dirty = true;
+            }
+            eprintln!(
+                "  {} ({})",
+                a.account_id,
+                nick.unwrap_or_else(|| "昵称未知".to_string())
+            );
+        }
+        if store_dirty {
+            store.save_default()?;
+        }
+
+        let result = wx_keychain::capture_key(&accounts, Duration::from_secs(timeout_secs)).await?;
+
+        let matched = &result.matched_account;
+        let hex_key = hex::encode(result.raw_key);
+        eprintln!("Key captured after {} PBKDF2 calls.", result.call_count);
+        eprintln!("Matched account: {}", matched.account_id);
+        println!("{hex_key}");
+
+        let nickname = wx_keychain::resolve_nickname(
+            &matched.data_dir,
+            &wx_decrypt::KeyMaterial::RawKey(result.raw_key),
+            &matched.base_wxid,
+        )
+        .unwrap_or_else(|e| {
+            eprintln!("  Warning: nickname resolution failed: {e}");
+            None
+        });
+
+        if let Some(ref n) = nickname {
+            eprintln!("Account nickname: {n}");
+        }
+
+        store.set(
+            &matched.account_id,
+            &hex_key,
+            &version,
+            nickname,
+            Some(matched.base_wxid.clone()),
         );
-    }
-    if store_dirty {
         store.save_default()?;
+        eprintln!("Key saved to {:?}", wx_keychain::KeyStore::default_path()?);
+
+        Ok(())
     }
-
-    let result = wx_keychain::capture_key(&accounts, Duration::from_secs(timeout_secs)).await?;
-
-    let matched = &result.matched_account;
-    let hex_key = hex::encode(result.raw_key);
-    eprintln!("Key captured after {} PBKDF2 calls.", result.call_count);
-    eprintln!("Matched account: {}", matched.account_id);
-    println!("{hex_key}");
-
-    let nickname = wx_keychain::resolve_nickname(
-        &matched.data_dir,
-        &wx_decrypt::KeyMaterial::RawKey(result.raw_key),
-        &matched.base_wxid,
-    )
-    .unwrap_or_else(|e| {
-        eprintln!("  Warning: nickname resolution failed: {e}");
-        None
-    });
-
-    if let Some(ref n) = nickname {
-        eprintln!("Account nickname: {n}");
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = timeout_secs;
+        Err("key extract (LLDB hook) is only supported on macOS — on Linux use `wx-cli key scan` (reads WeChat process memory via /proc) or `wx-cli key set` with a manual key"
+            .into())
     }
-
-    store.set(
-        &matched.account_id,
-        &hex_key,
-        &version,
-        nickname,
-        Some(matched.base_wxid.clone()),
-    );
-    store.save_default()?;
-    eprintln!("Key saved to {:?}", wx_keychain::KeyStore::default_path()?);
-
-    Ok(())
 }
 
+/// Platform-specific pre-flight for `key scan`.
 #[cfg(target_os = "macos")]
-pub fn cmd_key_scan() -> Result<(), Box<dyn std::error::Error>> {
+fn key_scan_preflight() -> Result<(), Box<dyn std::error::Error>> {
     // SIP check — task_for_pid fails with kern_return=5 when SIP is enabled,
     // even as root. This is a hard requirement (tested 2026-03-08).
     let sip = wx_keychain::check_sip();
@@ -81,10 +92,62 @@ pub fn cmd_key_scan() -> Result<(), Box<dyn std::error::Error>> {
         )
         .into());
     }
+    Ok(())
+}
 
-    // Find WeChat process (PID + version only).
+/// Platform-specific pre-flight for `key scan`.
+#[cfg(not(target_os = "macos"))]
+fn key_scan_preflight() -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(target_os = "linux")]
+    {
+        let ptrace = wx_keychain::check_ptrace_scope();
+        if !ptrace.passed {
+            return Err(ptrace.detail.into());
+        }
+    }
+    Ok(())
+}
+
+/// Platform-specific key memory scan dispatch.
+#[cfg(target_os = "macos")]
+fn scan_keys(
+    pid: u32,
+    accounts: &[wx_keychain::AccountDirInfo],
+) -> Result<Vec<wx_keychain::MachCaptureResult>, Box<dyn std::error::Error>> {
+    Ok(wx_keychain::capture_key_mach(
+        pid,
+        accounts,
+        &wx_decrypt::MACOS_4_1_7_31,
+    )?)
+}
+
+/// Platform-specific key memory scan dispatch.
+#[cfg(not(target_os = "macos"))]
+fn scan_keys(
+    pid: u32,
+    accounts: &[wx_keychain::AccountDirInfo],
+) -> Result<Vec<wx_keychain::MachCaptureResult>, Box<dyn std::error::Error>> {
+    #[cfg(target_os = "linux")]
+    {
+        Ok(wx_keychain::capture_key_linux(
+            pid,
+            accounts,
+            &wx_decrypt::WECHAT_4_X,
+        )?)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (pid, accounts);
+        Err("key scan is only supported on macOS and Linux".into())
+    }
+}
+
+pub fn cmd_key_scan() -> Result<(), Box<dyn std::error::Error>> {
+    key_scan_preflight()?;
+
+    // Find WeChat process (PID + version).
     let (pid, version) = wx_keychain::find_wechat_pid()?;
-    eprintln!("Found WeChat PID {} (v{})", pid, version);
+    eprintln!("Found WeChat PID {pid} (v{version})");
 
     // Load account directories.
     let accounts = wx_keychain::find_account_dirs()?;
@@ -99,14 +162,14 @@ pub fn cmd_key_scan() -> Result<(), Box<dyn std::error::Error>> {
 
     // Scan process memory.
     eprintln!("Scanning WeChat process memory...");
-    let results = wx_keychain::capture_key_mach(pid, &accounts, &wx_decrypt::MACOS_4_1_7_31)?;
+    let results = scan_keys(pid, &accounts)?;
 
     // Count total pairs across all results
     let total_pairs: usize = results
         .iter()
         .map(|r| match &r.key_material {
             wx_decrypt::KeyMaterial::EncKeys(pairs) => pairs.len(),
-            _ => unreachable!("capture_key_mach always returns EncKeys"),
+            _ => unreachable!("capture_key_* always returns EncKeys"),
         })
         .sum();
     eprintln!(
@@ -134,7 +197,7 @@ pub fn cmd_key_scan() -> Result<(), Box<dyn std::error::Error>> {
 
         let pairs = match &r.key_material {
             wx_decrypt::KeyMaterial::EncKeys(pairs) => pairs,
-            _ => unreachable!("capture_key_mach always returns EncKeys"),
+            _ => unreachable!("capture_key_* always returns EncKeys"),
         };
 
         store.set_enc_keys(
@@ -169,11 +232,6 @@ pub fn cmd_key_scan() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("Keys saved to {:?}", wx_keychain::KeyStore::default_path()?);
 
     Ok(())
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn cmd_key_scan() -> Result<(), Box<dyn std::error::Error>> {
-    Err("key scan is only supported on macOS".into())
 }
 
 pub fn cmd_key_list() -> Result<(), Box<dyn std::error::Error>> {
@@ -253,6 +311,59 @@ pub fn cmd_key_set(account: &str, hex_key: &str) -> Result<(), Box<dyn std::erro
     store.set(account, hex_key, "manual", None, None);
     store.save_default()?;
     eprintln!("Key saved for {account}.");
+    Ok(())
+}
+
+/// Import per-DB enc_key + salt pairs from a wcdb-key-tool `all_keys.json`.
+pub fn cmd_key_set_enc(
+    account: &str,
+    keys_json: &std::path::Path,
+    version: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let content = std::fs::read_to_string(keys_json)
+        .map_err(|e| format!("failed to read {}: {e}", keys_json.display()))?;
+    let root: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| format!("invalid JSON in {}: {e}", keys_json.display()))?;
+    let obj = root
+        .as_object()
+        .ok_or_else(|| format!("{} is not a JSON object", keys_json.display()))?;
+
+    let mut pairs: Vec<wx_decrypt::EncKeyPair> = Vec::new();
+    for entry in obj.values() {
+        let Some(entry) = entry.as_object() else {
+            continue;
+        };
+        let (Some(enc_key), Some(salt)) = (
+            entry.get("enc_key").and_then(|v| v.as_str()),
+            entry.get("salt").and_then(|v| v.as_str()),
+        ) else {
+            continue;
+        };
+        let key = parse_hex_key_32(enc_key, "enc_key")?;
+        let salt_bytes = hex::decode(salt).map_err(|e| format!("invalid salt: {e}"))?;
+        if salt_bytes.len() != 16 {
+            return Err(format!("salt must be 16 bytes, got {}", salt_bytes.len()).into());
+        }
+        let mut salt_arr = [0u8; 16];
+        salt_arr.copy_from_slice(&salt_bytes);
+        pairs.push(wx_decrypt::EncKeyPair {
+            key,
+            salt: salt_arr,
+        });
+    }
+    pairs.sort_by_key(|p| p.salt);
+    pairs.dedup_by_key(|p| p.salt);
+    if pairs.is_empty() {
+        return Err("no enc_key+salt entries found in JSON".into());
+    }
+
+    let mut store = wx_keychain::KeyStore::load_default()?;
+    store.set_enc_keys(account, &pairs, version, None, None);
+    store.save_default()?;
+    eprintln!(
+        "Imported {} per-DB enc_key+salt pairs for {account}.",
+        pairs.len()
+    );
     Ok(())
 }
 

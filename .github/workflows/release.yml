@@ -40,8 +40,29 @@ jobs:
           tar czf wx-cli-${{ github.ref_name }}-macos-arm64.tar.gz wx-cli
           mv wx-cli-${{ github.ref_name }}-macos-arm64.tar.gz ${{ github.workspace }}/
 
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies (clang for silk-rs/bindgen)
+        run: sudo apt-get update && sudo apt-get install -y clang libclang-dev
+
+      - name: Build release (linux x86_64)
+        run: cargo build --release --target x86_64-unknown-linux-gnu
+
+      - name: Package binary
+        run: |
+          cd target/x86_64-unknown-linux-gnu/release
+          chmod +x wx-cli
+          tar czf wx-cli-${{ github.ref_name }}-linux-x86_64.tar.gz wx-cli
+          mv wx-cli-${{ github.ref_name }}-linux-x86_64.tar.gz ${{ github.workspace }}/
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:
-          files: wx-cli-${{ github.ref_name }}-macos-arm64.tar.gz
+          files: wx-cli-${{ github.ref_name }}-linux-x86_64.tar.gz
           body: ${{ steps.changelog.outputs.body }}
